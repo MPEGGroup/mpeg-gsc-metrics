@@ -125,21 +125,33 @@ void RasterizerSoftware::render( const Pointcloud&  pc,
   int32_t numPoints = pc.size();
   int32_t count     = 0;
   auto    focal     = viewpoint.focal();
-  
+  auto    center    = viewpoint.center();  
   if ( viewpoint.originalHeight() > 0 ) {
     float scale = static_cast<float>(height) / static_cast<float>(viewpoint.originalHeight());
     focal = focal * scale;
+    center = center * scale;
   }
   
-  float   fov       = 2 * atan( 1.0f / ( 2 * focal[1] / image.height() ) );
   Camera  camera;
-  camera.create( 10.f, fov );
   camera.initialize( image.width(), image.height() );
   camera.setLookAt( viewpoint.pos(), viewpoint.view(), viewpoint.up() );
 
+  float     zNear = 0.01f, zFar = 10000000000.0f;
+  glm::mat4 projMat;
+  if ( center.x > 0.f && center.y > 0.f && focal.x > 0.f && focal.y > 0.f ) {
+    float left   = -zNear * center.x / focal.x;
+    float right  =  zNear * ( (float)image.width() - center.x ) / focal.x;
+    float bottom = -zNear * ( (float)image.height() - center.y ) / focal.y;
+    float top    =  zNear * center.y / focal.y;
+    projMat = glm::frustum( left, right, bottom, top, zNear, zFar );
+  } else {
+    float fov = 2 * atan( 1.0f / ( 2 * focal[1] / image.height() ) );
+    camera.create( 10.f, fov );
+    projMat = camera.projMat();
+  }
+
   glm::mat4 viewMat = camera.viewMat();
   auto      pos     = camera.getPosition();
-  auto      projMat = camera.projMat();
   auto      nearFar = camera.nearFar();
 
   // Project sorted splat
