@@ -168,16 +168,14 @@ void RasterizerHardware::render( const Pointcloud&  pc,
   load( pc );
 
   // Camera
-  auto      focal  = viewpoint.focal();
+  auto      focal = viewpoint.focal();
   auto      center = viewpoint.center();
-  
   if ( viewpoint.originalHeight() > 0 ) {
     float scale = static_cast<float>(image.height()) / static_cast<float>(viewpoint.originalHeight());
     focal = focal * scale;
     center = center * scale;
   }
-  
-  Camera    camera;
+  Camera camera;
   camera.initialize( image.width(), image.height() );
   camera.setLookAt( viewpoint.pos(), viewpoint.view(), viewpoint.up() );
 
@@ -194,7 +192,6 @@ void RasterizerHardware::render( const Pointcloud&  pc,
     camera.create( 10.f, fov );
     projMat = camera.projMat();
   }
-
   glm::mat4 viewMat       = camera.viewMat();
   auto      pos           = camera.getPosition();
   auto      nearFar       = camera.nearFar();

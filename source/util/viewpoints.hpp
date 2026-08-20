@@ -42,16 +42,18 @@ class GLFWwindow;
 
 class Viewpoint {
  public:
-  void set( glm::vec3 pos, glm::vec3 view, glm::vec3 up, glm::vec2 focal, int32_t originalWidth, int32_t originalHeight, glm::vec2 center = glm::vec2(0.f) ) {
-    pos_ = pos;
-    view_ = view;
-    up_ = up;
-    focal_ = focal;
-    originalWidth_ = originalWidth;
+  void set( int32_t index, glm::vec3 pos, glm::vec3 view, glm::vec3 up, glm::vec2 focal, int32_t originalWidth, int32_t originalHeight, glm::vec2 center = glm::vec2(0.f) ) {
+    index_          = index,
+    pos_            = pos;
+    view_           = view;
+    up_             = up;
+    focal_          = focal;
+    originalWidth_  = originalWidth;
     originalHeight_ = originalHeight;
     center_ = center;
   }
 
+  auto index() const { return index_; }
   auto pos() const { return pos_; }
   auto view() const { return view_; }
   auto up() const { return up_; }
@@ -78,13 +80,14 @@ class Viewpoint {
   }
 
  private:
+  int32_t   index_;
   glm::vec3 pos_;
   glm::vec3 view_;
   glm::vec3 up_;
   glm::vec2 focal_;
   glm::vec2 center_;
-  int32_t originalWidth_ = 0;
-  int32_t originalHeight_ = 0;
+  int32_t   originalWidth_ = 0;
+  int32_t   originalHeight_ = 0;
 };
 
 class Viewpoints {
@@ -95,8 +98,8 @@ class Viewpoints {
   void create( int numPoints, glm::vec3 center, float radius = 5.f, float focal = 2000.f, int32_t originalWidth = 0, int32_t originalHeight = 0 ) {
     viewpoints_.resize( numPoints );
     if ( numPoints == 1 ) {
-      viewpoints_[0].set( center + glm::vec3( radius, 0.0f, 0.0f ), center, glm::vec3( 0.0f, 1.0f, 0.0f ),
-                          glm::vec2( focal, focal ), originalWidth, originalHeight );
+      viewpoints_[0].set( 0, center + glm::vec3( radius, 0.0f, 0.0f ), center, glm::vec3( 0.0f, 1.0f, 0.0f ),
+                          glm::vec2( focal, focal ), originalWidth, originalHeight, glm::vec2( originalWidth / 2.f, originalHeight / 2.f ) );
       return;
     }
 
@@ -111,7 +114,7 @@ class Viewpoints {
       glm::vec3 worldUp = glm::vec3( 0.0f, 1.0f, 0.0f );
       glm::vec3 right   = glm::normalize( glm::cross( worldUp, view ) );
       glm::vec3 up      = glm::cross( view, right );
-      viewpoints_[i].set( pos, view, up, glm::vec2( focal, focal ), originalWidth, originalHeight );
+      viewpoints_[i].set( i, pos, view, up, glm::vec2( focal, focal ), originalWidth, originalHeight, glm::vec2( originalWidth / 2.f, originalHeight / 2.f ) );
     }
   }
 
@@ -151,6 +154,7 @@ class Viewpoints {
     int numPoints = 0;
     file >> numPoints;
     viewpoints_.resize( numPoints );
+    int32_t index = 0;
     for ( auto& el : viewpoints_ ) {
       glm::vec3 pos, view, up;
       glm::vec2 focal;
@@ -162,7 +166,8 @@ class Viewpoints {
       file >> focal.x >> focal.y;
       file >> center.x >> center.y;
       file >> originalWidth >> originalHeight;
-      el.set( pos, view, up, focal, originalWidth, originalHeight, center );
+      el.set( index, pos, view, up, focal, originalWidth, originalHeight, center );
+      index++;
     }
     file.close();
   }

@@ -149,7 +149,7 @@ struct Results {
     return *this;
   }
 
-  void log( const std::string& name = "" ) const { writeMetrics( std::cout, name ); }
+  void log( const std::string& name = "", bool isSmall = false ) const { writeMetrics( std::cout, name, isSmall ); }
   void saveToFile( const std::string& filename, const std::string& name = "" ) const {
     createDirectory( filename );
     std::ofstream file( filename, std::ios::app );
@@ -160,29 +160,33 @@ struct Results {
   }
 
  private:
-  void writeMetrics( std::ostream& os, const std::string& name = "" ) const {
+  void writeMetrics( std::ostream& os, const std::string& name = "", bool isSmall = false ) const {
     os << std::fixed << std::setprecision( 12 );
-    os << "Metric " << ( name.empty() ? "" : name ) << ":\n"
-       << "Mse RGB           = " << mseRgb_ << "\n"
-       << "Psnr RGB          = " << psnrRgb_ << "\n"
-       << "Psnr RGB (avg)    = " << std::setw( 20 ) << psnrRgbAvg_ << "\n"
-       << "Mse YUV           = " << mseYuv_ << "\n"
-       << "Psnr YUV          = " << psnrYuv_ << "\n"
-       << "Psnr YUV (avg)    = " << std::setw( 20 ) << psnrYuvAvg_ << "\n"
-       << "OM-Mse RGB        = " << mseRgbOm_ << "\n"
-       << "OM-Psnr RGB       = " << psnrRgbOm_ << "\n"
-       << "OM-Psnr RGB (avg) = " << std::setw( 20 ) << psnrRgbOmAvg_ << "\n"
-       << "OM-Mse YUV        = " << mseYuvOm_ << "\n"
-       << "OM-Psnr YUV       = " << psnrYuvOm_ << "\n"
-       << "OM-Psnr YUV (avg) = " << std::setw( 20 ) << psnrYuvOmAvg_ << "\n"
-       << "SSIM              = " << ssim_ << "\n"
-       << "SSIM (avg)        = " << std::setw( 20 ) << ssimAvg_ << "\n"
-       << "OM-SSIM           = " << ssimOm_ << "\n"
-       << "OM-SSIM (avg)     = " << std::setw( 20 ) << ssimOmAvg_ << "\n"
-       << "IVSSIM RGB        = " << std::setw( 20 ) << rgbIvSsim_ << "\n"
-       << "IVSSIM YUV        = " << std::setw( 20 ) << yuvIvSsim_ << "\n";
-    os << std::fixed << std::setprecision( 2 );
-    os << "Occupancy         = " << std::setw( 20 ) << occupancyRate_ << "%\n";
+    if ( isSmall ) {
+      os << "Psnr RGB = " << psnrRgb_ << " Psnr YUV = " << psnrYuv_ << "\n";
+    } else {
+      os << "Metric " << ( name.empty() ? "" : name ) << ":\n"
+         << "Mse RGB           = " << mseRgb_ << "\n"
+         << "Psnr RGB          = " << psnrRgb_ << "\n"
+         << "Psnr RGB (avg)    = " << std::setw( 20 ) << psnrRgbAvg_ << "\n"
+         << "Mse YUV           = " << mseYuv_ << "\n"
+         << "Psnr YUV          = " << psnrYuv_ << "\n"
+         << "Psnr YUV (avg)    = " << std::setw( 20 ) << psnrYuvAvg_ << "\n"
+         << "OM-Mse RGB        = " << mseRgbOm_ << "\n"
+         << "OM-Psnr RGB       = " << psnrRgbOm_ << "\n"
+         << "OM-Psnr RGB (avg) = " << std::setw( 20 ) << psnrRgbOmAvg_ << "\n"
+         << "OM-Mse YUV        = " << mseYuvOm_ << "\n"
+         << "OM-Psnr YUV       = " << psnrYuvOm_ << "\n"
+         << "OM-Psnr YUV (avg) = " << std::setw( 20 ) << psnrYuvOmAvg_ << "\n"
+         << "SSIM              = " << ssim_ << "\n"
+         << "SSIM (avg)        = " << std::setw( 20 ) << ssimAvg_ << "\n"
+         << "OM-SSIM           = " << ssimOm_ << "\n"
+         << "OM-SSIM (avg)     = " << std::setw( 20 ) << ssimOmAvg_ << "\n"
+         << "IVSSIM RGB        = " << std::setw( 20 ) << rgbIvSsim_ << "\n"
+         << "IVSSIM YUV        = " << std::setw( 20 ) << yuvIvSsim_ << "\n";
+      os << std::fixed << std::setprecision( 2 );
+      os << "Occupancy         = " << std::setw( 20 ) << occupancyRate_ << "%\n";
+    }
   }
 };
 
@@ -217,10 +221,10 @@ class Metric {
   }
 
   // Compute the SSIM metric
-  double computeSSIM( const Plane<double>& img1, const Plane<double>& img2 ) const;
+  double computeSSIM( const Plane<float>& img1, const Plane<float>& img2 ) const;
 
   // Compute the SSIM index with a mask (OM-SSIM)
-  double computeMaskedSSIM( const Plane<double>& img1, const Plane<double>& img2, const Plane<uint8_t>& mask ) const;
+  double computeMaskedSSIM( const Plane<float>& img1, const Plane<float>& img2, const Plane<uint8_t>& mask ) const;
 
   // Compute the IV-SSIM metric
   template <typename T, int32_t N>
@@ -234,4 +238,11 @@ class Metric {
   bool                                     computeIvssimMetrics_ = true;
   bool                                     computeQmiv_          = true;
   std::vector<Results>                     results_;
+  mutable Image<float, 3>                  yuvA_;
+  mutable Image<float, 3>                  yuvB_;
+  mutable std::vector<float>               ssimBuf1_;
+  mutable std::vector<float>               ssimBuf2_;
+  mutable Plane<float>                     paddedImg1_;
+  mutable Plane<float>                     paddedImg2_;
+  mutable Plane<float>                     paddedMask_;
 };

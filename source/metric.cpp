@@ -38,9 +38,23 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#if defined( USE_OPENMP )
+#include <omp.h>
+#endif
 
 #include "xSSIM.h"
+
 #include "xColorSpace.h"
+#if defined(__GNUC__) || defined(__clang__)
+  #pragma GCC target("fma")
+#endif
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <immintrin.h>
+#elif defined(__APPLE__) && defined(__arm64__)
+inline __m128 _mm_fmadd_ps(__m128 a, __m128 b, __m128 c) {
+    return _mm_add_ps(_mm_mul_ps(a, b), c);
+}
+#endif
 
 Metric::Metric( bool computeOm, bool computeSsim, bool computeIvssimMetrics, bool computeQmiv ) :
     computeOmMetrics_( computeOm ),
@@ -62,7 +76,7 @@ std::vector<std::vector<double>> generateGaussianWindow( int windowSize, double 
 
   for ( int i = -halfSize; i <= halfSize; i++ ) {
     for ( int j = -halfSize; j <= halfSize; j++ ) {
-      double value                       = std::exp( -( i * i + j * j ) / ( 2 * sigma * sigma ) );
+      double value                       = deterministic_exp( -( i * i + j * j ) / ( 2 * sigma * sigma ) );
       window[i + halfSize][j + halfSize] = value;
       sum += value;
     }
@@ -109,22 +123,48 @@ void Metric::compute( const Image<T, N>&       imageA,
     // Initialize statistical variables
     int32_t    validPixelCount = 0;
     glm::dvec3 mseRgbOm        = { 0.0, 0.0, 0.0 };
-    glm::dvec3 mseYuvOm        = { 0.0, 0.0, 0.0 };
+    glm::dvec3 mseYuvOm        = { 0.0, 0.0, 0.0 }; 
+    double mseRgbX = 0.0, mseRgbY = 0.0, mseRgbZ = 0.0;
+    double mseYuvX = 0.0, mseYuvY = 0.0, mseYuvZ = 0.0;
+    double mseRgbOmX = 0.0, mseRgbOmY = 0.0, mseRgbOmZ = 0.0;
+    double mseYuvOmX = 0.0, mseYuvOmY = 0.0, mseYuvOmZ = 0.0;
+    int32_t localValidPixelCount = 0;
 
     // Original MSE and OM-MSE computation
+#if defined( USE_OPENMP )
+    #pragma omp parallel for reduction(+:mseRgbX, mseRgbY, mseRgbZ, mseYuvX, mseYuvY, mseYuvZ, \
+                                         mseRgbOmX, mseRgbOmY, mseRgbOmZ, mseYuvOmX, mseYuvOmY, mseYuvOmZ, \
+                                         localValidPixelCount) schedule(static)
+#endif
     for ( int32_t index = 0; index < size; index++ ) {
-      const glm::dvec3 rgb = imageA.get( index ) - imageB.get( index );
-      const glm::dvec3 yuv = computeQmiv_ ? imageA.getYuvQmiv( index ) - imageB.getYuvQmiv( index )
-                                          : imageA.getYuv( index ) - imageB.getYuv( index );
-      res.mseRgb_ += rgb * rgb;
-      res.mseYuv_ += yuv * yuv;
+      const glm::dvec3 rgb = imageA.getD( index ) - imageB.getD( index );
+      const glm::dvec3 yuv = computeQmiv_ ? imageA.getYuvQmivD( index ) - imageB.getYuvQmivD( index )
+                                          : imageA.getYuvD( index ) - imageB.getYuvD( index );
+      mseRgbX += rgb.x * rgb.x;
+      mseRgbY += rgb.y * rgb.y;
+      mseRgbZ += rgb.z * rgb.z;
+      
+      mseYuvX += yuv.x * yuv.x;
+      mseYuvY += yuv.y * yuv.y;
+      mseYuvZ += yuv.z * yuv.z;
+
       // Use mask to detect valid pixels
       if ( computeOmMetrics_ && mask[0].get( index ) != 0 ) {
-        validPixelCount++;
-        mseRgbOm += rgb * rgb;
-        mseYuvOm += yuv * yuv;
+        localValidPixelCount++;
+        mseRgbOmX += rgb.x * rgb.x;
+        mseRgbOmY += rgb.y * rgb.y;
+        mseRgbOmZ += rgb.z * rgb.z;
+        
+        mseYuvOmX += yuv.x * yuv.x;
+        mseYuvOmY += yuv.y * yuv.y;
+        mseYuvOmZ += yuv.z * yuv.z;
       }
     }
+    res.mseRgb_     = { mseRgbX, mseRgbY, mseRgbZ };
+    res.mseYuv_     = { mseYuvX, mseYuvY, mseYuvZ };
+    validPixelCount = localValidPixelCount;
+    mseRgbOm        = { mseRgbOmX, mseRgbOmY, mseRgbOmZ };
+    mseYuvOm        = { mseYuvOmX, mseYuvOmY, mseYuvOmZ };
 
     // Computation PSNR full image
     res.mseRgb_ /= size;
@@ -183,38 +223,48 @@ void Metric::compute( const Image<T, N>&       imageA,
     // Compute SSIM and OM-SSIM metrics
     if ( computeSsimMetrics_ ) {
       // Create YUV images
-      Image<double, 3> yuvA( width, height );
-      Image<double, 3> yuvB( width, height );
-      for ( int32_t index = 0; index < size; index++ ) {
-        yuvA.set( index, computeQmiv_ ? imageA.getYuvQmiv( index ) : imageA.getYuv( index ) );
-        yuvB.set( index, computeQmiv_ ? imageB.getYuvQmiv( index ) : imageB.getYuv( index ) );
+      if ( yuvA_.width() != width || yuvA_.height() != height ) {
+        yuvA_.resize( width, height );
+        yuvB_.resize( width, height );
+      }      
+      if (computeQmiv_){
+        for ( int32_t index = 0; index < size; index++ ) {
+          yuvA_.setF( index, imageA.getYuvQmivF( index ) );
+          yuvB_.setF( index, imageB.getYuvQmivF( index ) );
+        }
+      } else {
+        for ( int32_t index = 0; index < size; index++ ) {
+          yuvA_.setF( index, imageA.getYuvF( index ) );
+          yuvB_.setF( index, imageB.getYuvF( index ) );
+        }
       }
 
-      // Compute SSIM for each channel
-      for ( int c = 0; c < 3; c++ ) { res.ssim_[c] = computeSSIM( yuvA[c], yuvB[c] ); }
-
+      // Compute SSIM for each channel      
+      for ( int c = 0; c < 3; c++ ) { 
+        res.ssim_[c] = computeSSIM( yuvA_[c], yuvB_[c] ); 
+      }
       // Compute SSIM weighted average (QMIV = 4:1:1 MPEG = 1:1:1)
       if ( computeQmiv_ ) {
         res.ssimAvg_ = ( 4.0 * res.ssim_[0] + res.ssim_[1] + res.ssim_[2] ) / 6.0;
       } else {
         res.ssimAvg_ = ( res.ssim_[0] + res.ssim_[1] + res.ssim_[2] ) / 3.0;
       }
-
       if ( computeOmMetrics_ ) {
         // Compute OM-SSIM for each channel
-        for ( int c = 0; c < 3; c++ ) { res.ssimOm_[c] = computeMaskedSSIM( yuvA[c], yuvB[c], mask.plane( 0 ) ); }
-
+        for ( int c = 0; c < 3; c++ ) { res.ssimOm_[c] = computeMaskedSSIM( yuvA_[c], yuvB_[c], mask.plane( 0 ) ); }
         // Compute OM-SSIM weighted average (QMIV = 4:1:1 MPEG = 1:1:1)
         if ( computeQmiv_ ) {
           res.ssimOmAvg_ = ( 4.0 * res.ssimOm_[0] + res.ssimOm_[1] + res.ssimOm_[2] ) / 6.0;
         } else {
           res.ssimOmAvg_ = ( res.ssimOm_[0] + res.ssimOm_[1] + res.ssimOm_[2] ) / 3.0;
         }
-      }
+      }      
     }
 
     // Compute IVSSIM metrics
-    if ( computeIvssimMetrics_ ) { computeIVSSIM( res, imageA, imageB ); }
+    if ( computeIvssimMetrics_ ) { 
+      computeIVSSIM( res, imageA, imageB ); 
+    }
   }
   results_.push_back( res );
 }
@@ -308,7 +358,6 @@ void Metric::computeIVSSIM( Results& result, const Image<T, N>& imageA, const Im
                                  picA.getBitDepth(),        //
                                  eClrSpcLC::BT709 );
   picA.extend();
-
   xColorSpace::ConvertRGB2YCbCr( picB.getAddr( eCmp::LM ),  //
                                  picB.getAddr( eCmp::CB ),  //
                                  picB.getAddr( eCmp::CR ),  //
@@ -337,40 +386,42 @@ void Metric::computeIVSSIM( Results& result, const Image<T, N>& imageA, const Im
 }
 
 // Standard SSIM computation function
-double Metric::computeSSIM( const Plane<double>& img1, const Plane<double>& img2 ) const {
+double Metric::computeSSIM( const Plane<float>& img1, const Plane<float>& img2 ) const {
   const int    width      = img1.width();
   const int    height     = img1.height();
   const int    windowSize = 11;
-  const double k1         = 0.01;
-  const double k2         = 0.03;
-  const double l          = 255.0;
-  const double c1         = ( k1 * l ) * ( k1 * l );
-  const double c2         = ( k2 * l ) * ( k2 * l );
-
-  // Initialize Gaussian window (if needed)
+  const float  k1         = 0.01f;
+  const float  k2         = 0.03f;
+  const float  l          = 255.0f;
+  const float  c1         = ( k1 * l ) * ( k1 * l );
+  const float  c2         = ( k2 * l ) * ( k2 * l );
   if ( gaussianWindow_.empty() || windowSize_ != windowSize || gaussianSigma_ != 1.5 ) {
     windowSize_     = windowSize;
     gaussianSigma_  = 1.5;
     gaussianWindow_ = generateGaussianWindow( windowSize, gaussianSigma_ );
   }
-
-  double    ssimTotal    = 0.0;
-  int       validWindows = 0;
-  const int halfWin      = windowSize / 2;
-
-  // Create padded images
-  Plane<double> paddedImg1, paddedImg2;
-  paddedImg1.resize( width + 2 * halfWin, height + 2 * halfWin, 0.0 );
-  paddedImg2.resize( width + 2 * halfWin, height + 2 * halfWin, 0.0 );
-
-  //  Copy original images and perform edge padding
-  for ( int y = 0; y < height; y++ ) {
-    for ( int x = 0; x < width; x++ ) {
-      paddedImg1.set( x + halfWin, y + halfWin, img1.get( x, y ) );
-      paddedImg2.set( x + halfWin, y + halfWin, img2.get( x, y ) );
+  float localWin[11][11];
+  for ( int j = 0; j < 11; j++ ) {
+    for ( int i = 0; i < 11; i++ ) {
+      localWin[j][i] = static_cast<float>(gaussianWindow_[j][i]);
     }
   }
-  // Pad edges
+  double    ssimTotal    = 0.0; 
+  int       validWindows = 0;
+  const int halfWin      = windowSize / 2;
+  const int pWidth        = width + 2 * halfWin;
+  const int pHeight       = height + 2 * halfWin;
+  const size_t neededSize = static_cast<size_t>(pWidth) * pHeight;
+  if ( ssimBuf1_.size() != neededSize ) {
+    ssimBuf1_.resize( neededSize );
+    ssimBuf2_.resize( neededSize );
+  }
+  for ( int y = 0; y < height; y++ ) {
+    for ( int x = 0; x < width; x++ ) {
+      ssimBuf1_[( y + halfWin ) * pWidth + ( x + halfWin )] = img1.get( x, y );
+      ssimBuf2_[( y + halfWin ) * pWidth + ( x + halfWin )] = img2.get( x, y );
+    }
+  }  
   const int srcX    = std::min( halfWin, width - 1 );
   const int srcY    = std::min( halfWin, height - 1 );
   const int bottomY = height + halfWin;
@@ -378,66 +429,105 @@ double Metric::computeSSIM( const Plane<double>& img1, const Plane<double>& img2
   for ( int y = 0; y < halfWin; y++ ) {
     const int yt = std::min( std::max( y - halfWin, 0 ), srcY );
     const int yb = std::min( std::max( y - halfWin, 0 ), height - 1 );
-    for ( int x = 0; x < width + 2 * halfWin; x++ ) {
-      // Top edge
+    for ( int x = 0; x < pWidth; x++ ) {
       const int x0 = std::min( std::max( x - halfWin, 0 ), width - 1 );
-      paddedImg1.set( x, y, img1.get( x0, yt ) );
-      paddedImg2.set( x, y, img2.get( x0, yt ) );
-      // Bottom edge
-      paddedImg1.set( x, bottomY + y, img1.get( x0, yb ) );
-      paddedImg2.set( x, bottomY + y, img2.get( x0, yb ) );
+      ssimBuf1_[y * pWidth + x              ] = img1.get( x0, yt );
+      ssimBuf2_[y * pWidth + x              ] = img2.get( x0, yt );
+      ssimBuf1_[( bottomY + y ) * pWidth + x] = img1.get( x0, yb );
+      ssimBuf2_[( bottomY + y ) * pWidth + x] = img2.get( x0, yb );
     }
   }
   for ( int x = 0; x < halfWin; x++ ) {
-    for ( int y = 0; y < height + 2 * halfWin; y++ ) {
-      // Left edge
+    for ( int y = 0; y < pHeight; y++ ) {
       const int y0 = std::min( std::max( y - halfWin, 0 ), height - 1 );
-      paddedImg1.set( x, y, img1.get( srcX, y0 ) );
-      paddedImg2.set( x, y, img2.get( srcX, y0 ) );
-      // Right edge
-      paddedImg1.set( rightX + x, y, img1.get( width - 1 - x, y0 ) );
-      paddedImg2.set( rightX + x, y, img2.get( width - 1 - x, y0 ) );
+      ssimBuf1_[y * pWidth + x             ] = img1.get( srcX, y0 );
+      ssimBuf2_[y * pWidth + x             ] = img2.get( srcX, y0 );
+      ssimBuf1_[y * pWidth + ( rightX + x )] = img1.get( width - 1 - x, y0 );
+      ssimBuf2_[y * pWidth + ( rightX + x )] = img2.get( width - 1 - x, y0 );
     }
   }
-  // Compute SSIM for each pixel
+  const __m256 v_c1 = _mm256_set1_ps(c1);
+  const __m256 v_c2 = _mm256_set1_ps(c2);
+#if defined( USE_OPENMP )
+  #pragma omp parallel for schedule(static) reduction(+:ssimTotal, validWindows)
+#endif
   for ( int y = 0; y < height; y++ ) {
-    for ( int x = 0; x < width; x++ ) {
-      double mu1 = 0.0, mu2 = 0.0;
-      double sigma1Sq = 0.0, sigma2Sq = 0.0, sigma12 = 0.0;
-
-      // Compute mean and variance
-      for ( int j = 0; j < windowSize; j++ ) {
-        for ( int i = 0; i < windowSize; i++ ) {
-          int    px     = x + i;
-          int    py     = y + j;
-          double weight = gaussianWindow_[i][j];
-          double val1   = paddedImg1.get( px, py );
-          double val2   = paddedImg2.get( px, py );
-          mu1 += weight * val1;
-          mu2 += weight * val2;
+    int x = 0;
+    for ( ; x <= width - 8; x += 8 ) {
+      __m256 v_mu1    = _mm256_setzero_ps();
+      __m256 v_mu2    = _mm256_setzero_ps();
+      __m256 v_var1   = _mm256_setzero_ps();
+      __m256 v_var2   = _mm256_setzero_ps();
+      __m256 v_cov12  = _mm256_setzero_ps();
+      for ( int j = 0; j < 11; j++ ) {
+        int py = y + j;
+        const float* __restrict b1_ptr = &ssimBuf1_[py * pWidth + x];
+        const float* __restrict b2_ptr = &ssimBuf2_[py * pWidth + x];
+        for ( int i = 0; i < 11; i++ ) {
+          __m256 v_w    = _mm256_set1_ps(localWin[j][i]);
+          __m256 v_val1 = _mm256_loadu_ps(&b1_ptr[i]);
+          __m256 v_val2 = _mm256_loadu_ps(&b2_ptr[i]);
+          __m256 v_w_val1 = _mm256_mul_ps(v_w, v_val1);
+          __m256 v_w_val2 = _mm256_mul_ps(v_w, v_val2);
+          v_mu1 = _mm256_add_ps(v_mu1, v_w_val1);
+          v_mu2 = _mm256_add_ps(v_mu2, v_w_val2);
+          v_var1  = _mm256_fmadd_ps(v_w_val1, v_val1, v_var1);
+          v_var2  = _mm256_fmadd_ps(v_w_val2, v_val2, v_var2);
+          v_cov12 = _mm256_fmadd_ps(v_w_val1, v_val2, v_cov12);
         }
       }
-
-      for ( int j = 0; j < windowSize; j++ ) {
-        for ( int i = 0; i < windowSize; i++ ) {
-          int    px     = x + i;
-          int    py     = y + j;
-          double weight = gaussianWindow_[i][j];
-          double val1   = paddedImg1.get( px, py );
-          double val2   = paddedImg2.get( px, py );
-
-          sigma1Sq += weight * ( val1 - mu1 ) * ( val1 - mu1 );
-          sigma2Sq += weight * ( val2 - mu2 ) * ( val2 - mu2 );
-          sigma12 += weight * ( val1 - mu1 ) * ( val2 - mu2 );
+      __m256 v_mu1Sq   = _mm256_mul_ps(v_mu1, v_mu1);
+      __m256 v_mu2Sq   = _mm256_mul_ps(v_mu2, v_mu2);
+      __m256 v_mu1_mu2 = _mm256_mul_ps(v_mu1, v_mu2);
+      __m256 v_sigma1Sq = _mm256_sub_ps(v_var1, v_mu1Sq);
+      __m256 v_sigma2Sq = _mm256_sub_ps(v_var2, v_mu2Sq);
+      __m256 v_sigma12  = _mm256_sub_ps(v_cov12, v_mu1_mu2);
+      __m256 v_num = _mm256_mul_ps(
+          _mm256_fmadd_ps(_mm256_set1_ps(2.0f), v_mu1_mu2, v_c1),
+          _mm256_fmadd_ps(_mm256_set1_ps(2.0f), v_sigma12, v_c2)
+      );
+      __m256 v_den = _mm256_mul_ps(
+          _mm256_add_ps(_mm256_add_ps(v_mu1Sq, v_mu2Sq), v_c1),
+          _mm256_add_ps(_mm256_add_ps(v_sigma1Sq, v_sigma2Sq), v_c2)
+      );
+      alignas(32) float res_num[8];
+      alignas(32) float res_den[8];
+      _mm256_store_ps(res_num, v_num);
+      _mm256_store_ps(res_den, v_den);
+      for ( int k = 0; k < 8; k++ ) {
+        if ( res_den[k] > 0.0f ) {
+          ssimTotal += static_cast<double>(res_num[k] / res_den[k]);
+          validWindows++;
         }
       }
-
-      // Compute SSIM
-      double numerator   = ( 2 * mu1 * mu2 + c1 ) * ( 2 * sigma12 + c2 );
-      double denominator = ( mu1 * mu1 + mu2 * mu2 + c1 ) * ( sigma1Sq + sigma2Sq + c2 );
-
-      if ( denominator > 0 ) {
-        ssimTotal += numerator / denominator;
+    }
+    for ( ; x < width; x++ ) {
+      float mu1 = 0.0f, mu2 = 0.0f;
+      float var1 = 0.0f, var2 = 0.0f, cov12 = 0.0f;
+      for ( int j = 0; j < 11; j++ ) {
+        int py = y + j;
+        const float* __restrict b1_ptr = &ssimBuf1_[py * pWidth + x];
+        const float* __restrict b2_ptr = &ssimBuf2_[py * pWidth + x];
+        for ( int i = 0; i < 11; i++ ) {
+          float weight = localWin[j][i];
+          float val1   = b1_ptr[i];
+          float val2   = b2_ptr[i];
+          float w_val1 = weight * val1;
+          float w_val2 = weight * val2;
+          mu1   += w_val1;
+          mu2   += w_val2;
+          var1  += w_val1 * val1;
+          var2  += w_val2 * val2;
+          cov12 += w_val1 * val2;
+        }
+      }
+      float sigma1Sq    = var1 - ( mu1 * mu1 );
+      float sigma2Sq    = var2 - ( mu2 * mu2 );
+      float sigma12     = cov12 - ( mu1 * mu2 );
+      float numerator   = ( 2.0f * mu1 * mu2 + c1 ) * ( 2.0f * sigma12 + c2 );
+      float denominator = ( mu1 * mu1 + mu2 * mu2 + c1 ) * ( sigma1Sq + sigma2Sq + c2 );
+      if ( denominator > 0.0f ) {
+        ssimTotal += static_cast<double>(numerator / denominator);
         validWindows++;
       }
     }
@@ -447,47 +537,45 @@ double Metric::computeSSIM( const Plane<double>& img1, const Plane<double>& img2
 }
 
 // Masked SSIM computation function (OM-SSIM)
-double Metric::computeMaskedSSIM( const Plane<double>&  img1,
-                                  const Plane<double>&  img2,
+double Metric::computeMaskedSSIM( const Plane<float>&   img1,
+                                  const Plane<float>&   img2,
                                   const Plane<uint8_t>& mask ) const {
   const int    width      = img1.width();
   const int    height     = img1.height();
   const int    windowSize = 11;
-  const double k1         = 0.01;
-  const double k2         = 0.03;
-  const double l          = 255.0;
-  const double c1         = ( k1 * l ) * ( k1 * l );
-  const double c2         = ( k2 * l ) * ( k2 * l );
-  const double threshold  = 0.5;  // Valid window threshold
-
-  // Initialize Gaussian window
+  const float  k1         = 0.01f;
+  const float  k2         = 0.03f;
+  const float  l          = 255.0f;
+  const float  c1         = ( k1 * l ) * ( k1 * l );
+  const float  c2         = ( k2 * l ) * ( k2 * l );
+  const float  threshold  = 0.5f;  
   if ( gaussianWindow_.empty() || windowSize_ != windowSize || gaussianSigma_ != 1.5 ) {
     windowSize_     = windowSize;
     gaussianSigma_  = 1.5;
     gaussianWindow_ = generateGaussianWindow( windowSize, gaussianSigma_ );
   }
-
-  const int halfWin      = windowSize / 2;
-  double    ssimTotal    = 0.0;
-  int       validWindows = 0;
-
-  // Create padded images and mask
-  Plane<double> paddedImg1, paddedImg2;
-  Plane<double> paddedMask;
-  paddedImg1.resize( width + 2 * halfWin, height + 2 * halfWin, 0.0 );
-  paddedImg2.resize( width + 2 * halfWin, height + 2 * halfWin, 0.0 );
-  paddedMask.resize( width + 2 * halfWin, height + 2 * halfWin, 0.0 );
-
-  // Copy original images and perform edge padding
-  for ( int y = 0; y < height; y++ ) {
-    for ( int x = 0; x < width; x++ ) {
-      paddedImg1.set( x + halfWin, y + halfWin, img1.get( x, y ) );
-      paddedImg2.set( x + halfWin, y + halfWin, img2.get( x, y ) );
-      paddedMask.set( x + halfWin, y + halfWin, mask.get( x, y ) );
+  float localWin[11][11];
+  for ( int j = 0; j < 11; j++ ) {
+    for ( int i = 0; i < 11; i++ ) {
+      localWin[j][i] = static_cast<float>(gaussianWindow_[i][j]);
     }
   }
 
-  // Pad edges
+  const int halfWin      = windowSize / 2;
+  double    ssimTotal    = 0.0;  
+  int       validWindows = 0;
+  const int pWidth       = width + 2 * halfWin;
+  const int pHeight      = height + 2 * halfWin;
+  paddedImg1_.resize( pWidth, pHeight, 0.0f );
+  paddedImg2_.resize( pWidth, pHeight, 0.0f );
+  paddedMask_.resize( pWidth, pHeight, 0.0f );
+  for ( int y = 0; y < height; y++ ) {
+    for ( int x = 0; x < width; x++ ) {
+      paddedImg1_.set( x + halfWin, y + halfWin, img1.get( x, y ) );
+      paddedImg2_.set( x + halfWin, y + halfWin, img2.get( x, y ) );
+      paddedMask_.set( x + halfWin, y + halfWin, static_cast<float>(mask.get( x, y )) );
+    }
+  }
   const int srcX    = std::min( halfWin, width - 1 );
   const int srcY    = std::min( halfWin, height - 1 );
   const int bottomY = height + halfWin;
@@ -495,87 +583,73 @@ double Metric::computeMaskedSSIM( const Plane<double>&  img1,
   for ( int y = 0; y < halfWin; y++ ) {
     const int yt = std::min( std::max( y - halfWin, 0 ), srcY );
     const int yb = std::min( std::max( y - halfWin, 0 ), height - 1 );
-    for ( int x = 0; x < width + 2 * halfWin; x++ ) {
-      // Top edge
+    for ( int x = 0; x < pWidth; x++ ) {
       const int x0 = std::min( std::max( x - halfWin, 0 ), width - 1 );
-      paddedImg1.set( x, y, img1.get( x0, yt ) );
-      paddedImg2.set( x, y, img2.get( x0, yt ) );
-      paddedMask.set( x, y, mask.get( x0, yt ) );
-      // Bottom edge
-      paddedImg1.set( x, bottomY + y, img1.get( x0, yb ) );
-      paddedImg2.set( x, bottomY + y, img2.get( x0, yb ) );
-      paddedMask.set( x, bottomY + y, mask.get( x0, yb ) );
+      paddedImg1_.set( x, y, img1.get( x0, yt ) );
+      paddedImg2_.set( x, y, img2.get( x0, yt ) );
+      paddedMask_.set( x, y, static_cast<float>(mask.get( x0, yt )) );
+      paddedImg1_.set( x, bottomY + y, img1.get( x0, yb ) );
+      paddedImg2_.set( x, bottomY + y, img2.get( x0, yb ) );
+      paddedMask_.set( x, bottomY + y, static_cast<float>(mask.get( x0, yb )) );
     }
   }
   for ( int x = 0; x < halfWin; x++ ) {
-    for ( int y = 0; y < height + 2 * halfWin; y++ ) {
-      // Left edge
+    for ( int y = 0; y < pHeight; y++ ) {
       const int y0 = std::min( std::max( y - halfWin, 0 ), height - 1 );
-      paddedImg1.set( x, y, img1.get( srcX, y0 ) );
-      paddedImg2.set( x, y, img2.get( srcX, y0 ) );
-      paddedMask.set( x, y, mask.get( srcX, y0 ) );
-      // Right edge
-      paddedImg1.set( rightX + x, y, img1.get( width - 1 - x, y0 ) );
-      paddedImg2.set( rightX + x, y, img2.get( width - 1 - x, y0 ) );
-      paddedMask.set( rightX + x, y, mask.get( width - 1 - x, y0 ) );
+      paddedImg1_.set( x, y, img1.get( srcX, y0 ) );
+      paddedImg2_.set( x, y, img2.get( srcX, y0 ) );
+      paddedMask_.set( x, y, static_cast<float>(mask.get( srcX, y0 )) );
+      paddedImg1_.set( rightX + x, y, img1.get( width - 1 - x, y0 ) );
+      paddedImg2_.set( rightX + x, y, img2.get( width - 1 - x, y0 ) );
+      paddedMask_.set( rightX + x, y, static_cast<float>(mask.get( width - 1 - x, y0 )) );
     }
   }
-
-  // Compute SSIM for each pixel
   for ( int y = 0; y < height; y++ ) {
     for ( int x = 0; x < width; x++ ) {
-      double mu1 = 0.0, mu2 = 0.0;
-      double sigma1Sq = 0.0, sigma2Sq = 0.0, sigma12 = 0.0;
-      double maskSum = 0.0;
-
-      // Compute weighted mean and mask sum
+      float mu1 = 0.0f, mu2 = 0.0f;
+      float sigma1Sq = 0.0f, sigma2Sq = 0.0f, sigma12 = 0.0f;
+      float maskSum = 0.0f;
       for ( int j = 0; j < windowSize; j++ ) {
+        int py = y + j;
         for ( int i = 0; i < windowSize; i++ ) {
-          int    px      = x + i;
-          int    py      = y + j;
-          double weight  = gaussianWindow_[i][j];
-          double maskVal = paddedMask.get( px, py );
-          double val1    = paddedImg1.get( px, py );
-          double val2    = paddedImg2.get( px, py );
-
-          mu1 += weight * maskVal * val1;
-          mu2 += weight * maskVal * val2;
-          maskSum += weight * maskVal;
+          int   px         = x + i;
+          float weight     = localWin[j][i];
+          float maskVal    = paddedMask_.get( px, py );
+          float val1       = paddedImg1_.get( px, py );
+          float float_val2 = paddedImg2_.get( px, py );
+          float w_mask     = weight * maskVal;
+          mu1     += w_mask * val1;
+          mu2     += w_mask * float_val2;
+          maskSum += w_mask;
         }
       }
-
-      // Skip windows with insufficient mask coverage
       if ( maskSum < threshold ) { continue; }
-
-      mu1 /= maskSum;
-      mu2 /= maskSum;
-
-      // Compute variance and covariance
+      float invMaskSum = 1.0f / maskSum;
+      mu1 *= invMaskSum;
+      mu2 *= invMaskSum;
       for ( int j = 0; j < windowSize; j++ ) {
+        int py = y + j;
         for ( int i = 0; i < windowSize; i++ ) {
-          int    px      = x + i;
-          int    py      = y + j;
-          double weight  = gaussianWindow_[i][j];
-          double maskVal = paddedMask.get( px, py );
-          double val1    = paddedImg1.get( px, py );
-          double val2    = paddedImg2.get( px, py );
-
-          sigma1Sq += weight * maskVal * ( val1 - mu1 ) * ( val1 - mu1 );
-          sigma2Sq += weight * maskVal * ( val2 - mu2 ) * ( val2 - mu2 );
-          sigma12 += weight * maskVal * ( val1 - mu1 ) * ( val2 - mu2 );
+          int   px      = x + i;
+          float weight  = localWin[j][i];
+          float maskVal = paddedMask_.get( px, py );
+          float val1    = paddedImg1_.get( px, py );
+          float float_val2    = paddedImg2_.get( px, py );
+          float diff1  = val1 - mu1;
+          float diff2  = float_val2 - mu2;
+          float w_mask = weight * maskVal;
+          sigma1Sq += w_mask * diff1 * diff1;
+          sigma2Sq += w_mask * diff2 * diff2;
+          sigma12  += w_mask * diff1 * diff2;
         }
       }
-
-      sigma1Sq /= maskSum;
-      sigma2Sq /= maskSum;
-      sigma12 /= maskSum;
-
-      // Compute SSIM
-      double numerator   = ( 2 * mu1 * mu2 + c1 ) * ( 2 * sigma12 + c2 );
-      double denominator = ( mu1 * mu1 + mu2 * mu2 + c1 ) * ( sigma1Sq + sigma2Sq + c2 );
-
-      if ( denominator > 0 ) {
-        ssimTotal += numerator / denominator;
+      sigma1Sq *= invMaskSum;
+      sigma2Sq *= invMaskSum;
+      sigma12  *= invMaskSum;
+      float numerator   = ( 2.0f * mu1 * mu2 + c1 ) * ( 2.0f * sigma12 + c2 );
+      float denominator = ( mu1 * mu1 + mu2 * mu2 + c1 ) * ( sigma1Sq + sigma2Sq + c2 );
+      if ( denominator > 0.0f ) {
+        ssimTotal += static_cast<double>(numerator / denominator);
         validWindows++;
       }
     }

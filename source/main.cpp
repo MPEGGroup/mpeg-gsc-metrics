@@ -42,10 +42,31 @@
 #include "version.hpp"
 #include "metric.hpp"
 #include "timer.hpp"
+#include <filesystem> 
+#include <fstream>
 
 #if defined( USE_OPENMP )
 #include <omp.h>
 #endif
+namespace fs = std::filesystem;
+
+std::string getFileHash(const std::string& filepath) {
+  std::ifstream file(filepath, std::ios::binary);
+  if (!file.is_open()) return "0000000000000000";
+  const uint64_t FNV_prime = 1099511628211ULL;
+  uint64_t hash = 14695981039346656037ULL;
+  char buffer[8192]; 
+  while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
+    std::streamsize bytes = file.gcount();
+    for (std::streamsize i = 0; i < bytes; ++i) {
+      hash ^= static_cast<uint8_t>(buffer[i]);
+      hash *= FNV_prime;
+    }
+  }
+  std::stringstream ss;
+  ss << std::hex << std::setw(16) << std::setfill('0') << hash;
+  return ss.str();
+}
 
 // Parse input command line
 struct Parameters {
@@ -73,6 +94,7 @@ struct Parameters {
   bool        computeSsim_       = true;
   bool        computeIvssim_     = false;
   bool        computeQmiv_       = false;
+  bool        useSrcImages_      = true;
 
   bool parse( int32_t argc, char* argv[] ) {
     namespace po = df::program_options_lite;
@@ -117,6 +139,7 @@ struct Parameters {
       ( po::Section("Output") )      
         ("s,save",            save_,              save_,              "Save generated videos")
         ("o,output",          outputPath_,        outputPath_,        "Output text file for metrics")
+        ("useSrcImages",      useSrcImages_,      useSrcImages_,      "Create source images")
       ;
 
     /* clang-format on */
@@ -134,9 +157,8 @@ struct Parameters {
       return 1;
     }
     if ( useFloat_ && save_ ) {
-      printf(
-          "Warning: Floating point images are not compatible with the recording option, disabling the creation of "
-          "output videos\n" );
+      printf( "Warning: Floating point images are not compatible with the recording option, "
+          "disabling the creation of output videos\n" );
       save_ = false;
     }
     if ( ( !useCameraPosition_ ) && viewpointPath_.empty() && numPoints_ == 0 ) {
@@ -165,13 +187,10 @@ int main( int32_t argc, char* argv[] ) {
 
   Parameters params;
   if ( params.parse( argc, argv ) ) { return 1; }
-  auto start = std::chrono::high_resolution_clock::now();
-
-  Video<uint8_t, 1> videoOcm[2];
-  Video<uint8_t, 3> videoImg[2];
-  Metric            metric( params.computeOm_, params.computeSsim_, params.computeIvssim_, params.computeQmiv_ );
-  Rasterizer        rasterizer( params.useCPU_ ), rasterizerCpu( true ), rasterizerGpu( false );
-  Timer             timer;
+  auto start = std::chrono::high_resolution_clock::now();  
+  Timer      timer;
+  Metric     metric( params.computeOm_, params.computeSsim_, params.computeIvssim_, params.computeQmiv_ );
+  Rasterizer rasterizer( params.useCPU_ ), rasterizerCpu( true ), rasterizerGpu( false );
 #if defined( USE_OPENMP )
   omp_set_dynamic(0);
   if ( params.numThreads_ > 0 ) {
@@ -180,8 +199,44 @@ int main( int32_t argc, char* argv[] ) {
     omp_set_num_threads(omp_get_num_procs());
   }
 #endif
+  // Create saved video files 
+  auto srcName = getOuputName( getBasename( params.sourcePath_ ) );
+  auto decName = getOuputName( getBasename( params.decodePath_ ) );
+  auto suffix =
+      ( params.outputPath_.empty() ? getOuputName( params.decodePath_ ) : getRemoveExtension( params.outputPath_ ) ) +
+      ( params.compareCpuGpu_ ? "_cpu_vs_gpu" : ( params.useCPU_ ? "_cpu" : "_gpu" ) );
+  std::string filenameSrc = suffix + "_img_src_" + std::to_string( params.width_ ) + "x" + std::to_string( params.height_ ) + "_" +
+                            std::to_string( sizeof( uint8_t ) * 8 ) + "b_p444.rgb";
+  std::string filenameDec = suffix + "_img_dec_" + std::to_string( params.width_ ) + "x" + std::to_string( params.height_ ) + "_" +
+                            std::to_string( sizeof( uint8_t ) * 8 ) + "b_p444.rgb";
+  std::ofstream fileSrc;
+  std::ofstream fileDec;
+  if ( !params.useFloat_ && params.save_ ) {
+    createDirectory( filenameSrc );
+    fileSrc.open( filenameSrc, std::ios::binary );
+    if ( !fileSrc.is_open() ) {
+      printf( "Error: Unable to open file %s for writing.\n", filenameSrc.c_str() );
+      return 1;
+    }
+    createDirectory( filenameDec );
+    fileDec.open( filenameDec, std::ios::binary );
+    if ( !fileDec.is_open() ) {
+      printf( "Error: Unable to open file %s for writing.\n", filenameDec.c_str() );
+      return 1;
+    }
+  }
+  std::filesystem::path srcFilePath(params.sourcePath_);
+  std::filesystem::path srcDir = srcFilePath.parent_path();
+  std::string objName = srcDir.filename().string();
+  std::string fileHash;
+  // Loop frames
   for ( int32_t frameIndex = 0; frameIndex < params.frameCount_; frameIndex++ ) {
     
+    if (params.useSrcImages_){         
+      auto filename = createFilename( params.sourcePath_, params.startFrame_ + frameIndex );
+      if (params.verbose_) printf("Hashing source file %s ...\n", filename.c_str());
+      fileHash = getFileHash(filename);
+    }
     // Load pointclouds
     Pointcloud pc[2];
     timer.tic( "Read" );
@@ -191,7 +246,6 @@ int main( int32_t argc, char* argv[] ) {
     if ( params.verbose_ ){
       for ( int32_t i = 0; i < 2; i++ ) pc[i].trace();
     }
-
     // Create viewpoint list
     Viewpoints viewpoints;
     if ( !params.viewpointPath_.empty() ) { viewpoints.read( params.viewpointPath_ ); }
@@ -217,7 +271,7 @@ int main( int32_t argc, char* argv[] ) {
         if (params.onlyViewpoint_ != -1 && params.onlyViewpoint_ < cameraPosition0.size()) {
           viewpoints.resize(1);
           const auto& el = cameraPosition0[params.onlyViewpoint_];
-          viewpoints[0].set( el.pos(), el.view(), el.up(), el.focal_, el.width_, el.height_, el.center_ );
+          viewpoints[0].set( el.index_, el.pos(), el.view(), el.up(), el.focal_, el.width_, el.height_, el.center_ );
           if ( params.verbose_ ) { 
             printf("onlyViewpoint == %d, keep only one viewpoint \n", params.onlyViewpoint_);
             el.log();
@@ -226,7 +280,7 @@ int main( int32_t argc, char* argv[] ) {
           viewpoints.resize( cameraPosition0.size() );
           for ( size_t i = 0; i < cameraPosition0.size(); i++ ) {
             const auto& el = cameraPosition0[i];
-            viewpoints[i].set( el.pos(), el.view(), el.up(), el.focal_, el.width_, el.height_, el.center_ );
+            viewpoints[i].set( el.index_, el.pos(), el.view(), el.up(), el.focal_, el.width_, el.height_, el.center_ );
             if ( params.verbose_ ) el.log();
          }
         }
@@ -254,91 +308,86 @@ int main( int32_t argc, char* argv[] ) {
       viewpoints.display( pc[1], params.width_, params.height_ );
       return 0;
     }
-
-    // Resize
-    if ( params.save_ ) {
-      auto numFrames = videoImg[0].size() + viewpoints.size();
-      for ( int32_t i = 0; i < 2; i++ ) videoImg[i].resize( numFrames, params.width_, params.height_ );
-      for ( int32_t i = 0; i < 2; i++ ) videoOcm[i].resize( numFrames, params.width_, params.height_ );
-    }
-
     // Rendering
-#pragma omp parallel if ( params.useCPU_ )
-    {
-#pragma omp for
-      for ( int32_t viewpointIndex = 0; viewpointIndex < (int32_t)viewpoints.size(); viewpointIndex++ ) {
-        auto  imageFloat = std::array<Image<float>, 2>{ Image<float, 3>( params.width_, params.height_ ),
-                                                        Image<float, 3>( params.width_, params.height_ ) };
-        auto  imageUint8 = std::array<Image<uint8_t>, 2>{ Image<uint8_t, 3>( params.width_, params.height_ ),
-                                                          Image<uint8_t, 3>( params.width_, params.height_ ) };
-        auto  imageOcm   = std::array<Image<uint8_t, 1>, 2>{ Image<uint8_t, 1>( params.width_, params.height_ ),
-                                                          Image<uint8_t, 1>( params.width_, params.height_ ) };
-        auto& viewpoint  = viewpoints[viewpointIndex];
-        Image<uint8_t, 1> imageOcmUnion;
-        if ( params.verbose_ ) {
-          printf( "Frame %3d / %3d: viewpoints %3d / %3zu ", frameIndex, params.frameCount_, viewpointIndex,
-                  viewpoints.size() );
-#if defined( USE_OPENMP )
-          printf( "Thread %2d / %2d (dynamic=%d) ", omp_get_thread_num(), omp_get_num_threads(), omp_get_dynamic() );
-#endif
-          printf( "\n" );
-          fflush( stdout );
-        }
-        // Rasterize
-        timer.tic( "Rasterize" );
-        if ( !params.compareCpuGpu_ ) {
-          for ( int32_t i = 0; i < 2; i++ )
-            if ( params.useFloat_ )
-              rasterizer.render( pc[i], viewpoint, imageFloat[i], imageOcm[i] );
-            else
-              rasterizer.render( pc[i], viewpoint, imageUint8[i], imageOcm[i] );
-        } else {
-          if ( params.useFloat_ ) {
-            rasterizerCpu.render( pc[0], viewpoint, imageFloat[0], imageOcm[0] );
-            rasterizerGpu.render( pc[1], viewpoint, imageFloat[1], imageOcm[1] );
-          } else {
-            rasterizerCpu.render( pc[0], viewpoint, imageUint8[0], imageOcm[0] );
-            rasterizerGpu.render( pc[1], viewpoint, imageUint8[1], imageOcm[1] );
-          }
-        }
-        timer.toc( "Rasterize", params.verbose_ );
-
-        // Save
-        if ( params.save_ ) {
-          uint32_t frameIndex = videoImg[0].size() - viewpoints.size() + viewpointIndex;
-          if ( params.useFloat_ ) {
-            for ( int32_t i = 0; i < 2; i++ ) videoImg[i][frameIndex] = imageFloat[i];
-          } else {
-            for ( int32_t i = 0; i < 2; i++ ) videoImg[i][frameIndex] = imageUint8[i];
-          }
-          for ( int32_t i = 0; i < 2; i++ ) videoOcm[i][frameIndex] = imageOcm[i];
-        }
-
-        // Compute the union of two masks (ocm_union)
-        if ( params.computeOm_ ) {
-          timer.tic( "UnionMask" );
-          imageOcmUnion.resize( params.width_, params.height_ );
-          for ( int32_t y = 0; y < params.height_; y++ ) {
-            for ( int32_t x = 0; x < params.width_; x++ ) {
-              uint8_t val0 = imageOcm[0].plane( 0 ).get( x, y );
-              uint8_t val1 = imageOcm[1].plane( 0 ).get( x, y );
-              imageOcmUnion.plane( 0 ).set( x, y, ( val0 || val1 ) ? 1 : 0 );
+    for ( int32_t viewpointIndex = 0; viewpointIndex < (int32_t)viewpoints.size(); viewpointIndex++ ) {
+      std::array<Image<float>, 2>       imageFloat;
+      std::array<Image<uint8_t>, 2>     imageUint8;
+      std::array<Image<uint8_t, 1>, 2>  imageOcm;
+      Image<uint8_t, 1>                 imageOcmUnion;
+      if ( params.useFloat_ ) {
+        imageFloat = { Image<float, 3>( params.width_, params.height_ ), Image<float, 3>( params.width_, params.height_ ) };
+      } else {
+        imageUint8 = { Image<uint8_t, 3>( params.width_, params.height_ ), Image<uint8_t, 3>( params.width_, params.height_ ) };
+      }
+      imageOcm = { Image<uint8_t, 1>( params.width_, params.height_ ), Image<uint8_t, 1>( params.width_, params.height_ ) };
+      auto& viewpoint  = viewpoints[viewpointIndex];
+      // Rasterize
+      timer.tic( "Rasterize" );
+      if ( !params.compareCpuGpu_ ) {
+        if ( params.useFloat_ ){
+          rasterizer.render( pc[0], viewpoint, imageFloat[0], imageOcm[0] );
+          rasterizer.render( pc[1], viewpoint, imageFloat[1], imageOcm[1] );
+        } else{
+          bool srcImageLoaded = false;
+          std::filesystem::path pngName; 
+          if (params.useSrcImages_) {            
+            pngName = srcDir / "rasterized_images" / (objName + stringFormat( "_F%04d_", frameIndex ) + fileHash) / 
+              ( objName + stringFormat("_F%04d_V%04d_%dx%d.png", frameIndex, viewpoint.index(), params.width_, params.height_));   
+            if (std::filesystem::exists(pngName)) {
+              imageUint8[0].loadPNG(pngName.string());               
+              srcImageLoaded = true;
+              if (params.verbose_) printf("Load source image from cache.\n");
             }
           }
-          timer.toc( "UnionMask", params.verbose_ );
+          if (!srcImageLoaded) {                 
+            rasterizer.render( pc[0], viewpoint, imageUint8[0], imageOcm[0] );          
+            if (params.useSrcImages_) {              
+              std::filesystem::create_directories(pngName.parent_path()); 
+              imageUint8[0].savePNG(pngName.string()); 
+              if (params.verbose_) printf("Rasterize and save source image from cache.\n");
+            }
+          }
+          rasterizer.render( pc[1], viewpoint, imageUint8[1], imageOcm[1] );
         }
-
-        // Metric
-        timer.tic( "Metric" );
-        if ( params.useFloat_ )
-          metric.compute( imageFloat[0], imageFloat[1], imageOcmUnion, frameIndex );
-        else
-          metric.compute( imageUint8[0], imageUint8[1], imageOcmUnion, frameIndex );
-        timer.toc( "Metric", params.verbose_ );
+      } else {
+        if ( params.useFloat_ ) {
+          rasterizerCpu.render( pc[0], viewpoint, imageFloat[0], imageOcm[0] );
+          rasterizerGpu.render( pc[1], viewpoint, imageFloat[1], imageOcm[1] );
+        } else {
+          rasterizerCpu.render( pc[0], viewpoint, imageUint8[0], imageOcm[0] );
+          rasterizerGpu.render( pc[1], viewpoint, imageUint8[1], imageOcm[1] );
+        }
       }
-    }
-    if ( params.verbose_ ) {
-      metric.getLastFrame().log( stringFormat( getBasename( params.decodePath_ ).c_str(), frameIndex ) );
+      timer.toc( "Rasterize", false );
+      // Compute the union of two masks (ocm_union)
+      if ( params.computeOm_ ) {
+        timer.tic( "UnionMask" );
+        imageOcmUnion.resize( params.width_, params.height_ );
+        for ( int32_t y = 0; y < params.height_; y++ ) {
+          for ( int32_t x = 0; x < params.width_; x++ ) {
+            uint8_t val0 = imageOcm[0].plane( 0 ).get( x, y );
+            uint8_t val1 = imageOcm[1].plane( 0 ).get( x, y );
+            imageOcmUnion.plane( 0 ).set( x, y, ( val0 || val1 ) ? 1 : 0 );
+          }
+        }
+        timer.toc( "UnionMask", false );
+      }
+      // Metric
+      if ( params.useFloat_ ){
+        metric.compute( imageFloat[0], imageFloat[1], imageOcmUnion, frameIndex );
+      } else {
+        metric.compute( imageUint8[0], imageUint8[1], imageOcmUnion, frameIndex );
+      }
+      // Save
+      if ( params.save_ && !params.useFloat_ ) {        
+        imageUint8[0].save( fileSrc, true );
+        imageUint8[1].save( fileDec, true );      
+      }
+      if ( params.verbose_ ) {
+        printf( "Frame: %3d / %3d: View: %3d / %3zu Psnr: RGB = %8.4f YUV = %8.4f  Time: %s \n", frameIndex, params.frameCount_, viewpointIndex,
+                viewpoints.size(), metric.getLastFrame().psnrRgbAvg_, metric.getLastFrame().psnrYuvAvg_, timer.getLastDurationsString().c_str()  );
+        fflush( stdout );
+      }
     }
   }
 
@@ -353,39 +402,8 @@ int main( int32_t argc, char* argv[] ) {
   }
   if ( params.verbose_ ) timer.trace();
 
-  // Save
-  if ( !params.useFloat_ && params.save_ ) {
-    auto srcName = getOuputName( getBasename( params.sourcePath_ ) );
-    auto decName = getOuputName( getBasename( params.decodePath_ ) );
-    auto suffix =
-        ( params.outputPath_.empty() ? getOuputName( params.decodePath_ ) : getRemoveExtension( params.outputPath_ ) ) +
-        ( params.compareCpuGpu_ ? "_cpu_vs_gpu" : ( params.useCPU_ ? "_cpu" : "_gpu" ) );
-
-    // Creation of butterfly and difference videos
-    auto videoImgBty = Video<uint8_t>( videoImg[0], videoImg[1], true );
-    auto videoImgDif = videoImg[0] - videoImg[1];
-    auto videoOcmDif = videoOcm[0] - videoOcm[1];
-
-    // Add overlay
-    // videoImg[0].draw( "Source", 0, 8 );
-    // videoImg[0].draw( srcName, 0, 24 );
-    // videoImg[1].draw( "Decode", 0, 8 );
-    // videoImg[1].draw( decName, 0, 24 );
-    // videoImgBty.draw( "Source", 0, 8 );
-    // videoImgBty.draw( srcName, 0, 24 );
-    // videoImgBty.draw( "Decode", params.width_ - 8, 8, true );
-    // videoImgBty.draw( decName, params.width_ - 8, 24, true );
-
-    // Save video
-    videoImg[0].save( suffix + "_img_src", true );
-    videoImg[1].save( suffix + "_img_dec", true );
-    // videoOcm[0].save( suffix + "_ocm_src", true );
-    // videoOcm[1].save( suffix + "_ocm_dec", true );
-    // videoImgDif.save( suffix + "_img_dif", true );
-    // videoOcmDif.save( suffix + "_ocm_dif", true );
-    // videoImgBty.save( suffix + "_img_bty", true );
-  }
   std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - start;
+  printf( "Peak Memory: %.2f MB\n", static_cast<double>(getPeakMemoryUsage()) / (1024.0 * 1024.0) );
   printf( "Total time: %.3f seconds\n", elapsed.count() );
   fflush( stdout );
   return 0;

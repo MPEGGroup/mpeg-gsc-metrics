@@ -35,70 +35,106 @@
 #pragma once
 
 #include "common.hpp"
+#include <vector>
+#include <string>
+#include <chrono>
+#include <algorithm>
+#include <iostream>
+#include <iomanip>
 
 class Timer {
- public:
-  typedef std::tuple<std::string,
-                     std::chrono::time_point<std::chrono::steady_clock, std::chrono::nanoseconds>,
-                     std::chrono::nanoseconds>
-      TicToc;
+ public:  
+  struct TicToc {
+    std::string                           name;
+    std::chrono::steady_clock::time_point start;
+    std::chrono::nanoseconds              totalDuration{0};
+    std::chrono::nanoseconds              lastDuration{0};
+  };
 
   void tic( const std::string& name ) {
     auto it = std::find_if( m_ticTocList.begin(), m_ticTocList.end(),
-                            [&name]( const TicToc& element ) { return std::get<0>( element ) == name; } );
-
+                            [&name]( const TicToc& element ) { return element.name == name; } );
     auto start = std::chrono::steady_clock::now();
     if ( it != m_ticTocList.end() ) {
-      std::get<1>( *it ) = start;
+      it->start = start;
     } else {
-      m_ticTocList.push_back( std::make_tuple( name, start, std::chrono::nanoseconds( 0 ) ) );
+      m_ticTocList.push_back( { name, start, std::chrono::nanoseconds( 0 ), std::chrono::nanoseconds( 0 ) } );
     }
   }
 
   void toc( const std::string& name, const bool verbose = true ) {
     auto it = std::find_if( m_ticTocList.begin(), m_ticTocList.end(),
-                            [&name]( const TicToc& element ) { return std::get<0>( element ) == name; } );
-
+                            [&name]( const TicToc& element ) { return element.name == name; } );
     if ( it != m_ticTocList.end() ) {
       auto end      = std::chrono::steady_clock::now();
-      auto duration = end - std::get<1>( *it );
-      std::get<2>( *it ) += duration;
+      auto duration = end - it->start;      
+      it->totalDuration += duration;  
+      it->lastDuration   = duration;       
       if ( verbose )
         std::cout << "Duration " << std::left << std::setw( 25 ) << name << ": time = " << std::right << std::setw( 15 )
                   << std::chrono::duration<double>( duration ).count() << " s Total = " << std::setw( 15 )
-                  << std::chrono::duration<double>( std::get<2>( *it ) ).count() << " s\n";
+                  << std::chrono::duration<double>( it->totalDuration ).count() << " s\n";
     } else {
       std::cout << "Duration " << name << ": can't find clock\n";
     }
   }
 
+  float getLastDuration( const std::string& name ) {
+    auto it = std::find_if( m_ticTocList.begin(), m_ticTocList.end(),
+                            [&name]( const TicToc& element ) { return element.name == name; } );
+    if ( it != m_ticTocList.end() ) {      
+      return static_cast<float>( std::chrono::duration<double>( it->lastDuration ).count() );
+    }
+    return 0.0f;
+  }
+
   void reset( const std::string& name ) {
     auto it = std::find_if( m_ticTocList.begin(), m_ticTocList.end(),
-                            [&name]( const TicToc& element ) { return std::get<0>( element ) == name; } );
+                            [&name]( const TicToc& element ) { return element.name == name; } );
 
-    if ( it != m_ticTocList.end() ) { std::get<2>( *it ) = std::chrono::nanoseconds( 0 ); }
+    if ( it != m_ticTocList.end() ) { 
+      it->totalDuration = std::chrono::nanoseconds( 0 ); 
+      it->lastDuration  = std::chrono::nanoseconds( 0 ); 
+    }
   }
 
   double getTime( const std::string& name ) const {
     auto it = std::find_if( m_ticTocList.begin(), m_ticTocList.end(),
-                            [&name]( const TicToc& element ) { return std::get<0>( element ) == name; } );
+                            [&name]( const TicToc& element ) { return element.name == name; } );
 
     if ( it != m_ticTocList.end() ) {
-      return ( std::get<2>( *it ) == std::chrono::nanoseconds::max() )
+      return ( it->totalDuration == std::chrono::nanoseconds::max() )
                  ? -1.0
-                 : std::chrono::duration<double>( std::get<2>( *it ) ).count();
+                 : std::chrono::duration<double>( it->totalDuration ).count();
     }
     return -1.0;
+  }
+  
+  std::string getLastDurationsString() {
+    if ( m_ticTocList.empty() ) {
+      return "No active timers.";
+    }
+    std::stringstream ss;
+    for ( size_t i = 0; i < m_ticTocList.size(); ++i ) {
+      auto& el = m_ticTocList[i];
+      double seconds = std::chrono::duration<double>( el.lastDuration ).count();
+      el.lastDuration = std::chrono::nanoseconds( 0 );
+      ss << el.name << " = " << std::fixed << std::setprecision(4) << std::setw( 8 ) << seconds << " s";      
+      if ( i + 1 < m_ticTocList.size() ) {
+        ss << " ";
+      }
+    }
+    return ss.str();
   }
 
   void trace() const {
     std::cout << "Duration: \n";
     for ( const auto& el : m_ticTocList ) {
-      std::cout << "  " << std::left << std::setw( 25 ) << std::get<0>( el ) << ": time = " << std::right
+      std::cout << "  " << std::left << std::setw( 25 ) << el.name << ": time = " << std::right
                 << std::setw( 15 )
-                << ( std::get<2>( el ) == std::chrono::nanoseconds::max()
+                << ( el.totalDuration == std::chrono::nanoseconds::max()
                          ? -1.0
-                         : std::chrono::duration<double>( std::get<2>( el ) ).count() )
+                         : std::chrono::duration<double>( el.totalDuration ).count() )
                 << " s\n";
     }
   }

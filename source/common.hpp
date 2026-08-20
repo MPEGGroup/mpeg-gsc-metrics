@@ -35,7 +35,9 @@
  */
 #pragma once
 
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #define _USE_MATH_DEFINES
 #include <algorithm>
 #include <array>
@@ -68,6 +70,10 @@
 
 #ifdef WIN32
 #include <windows.h>
+#include <psapi.h>
+#elif defined(__linux__)
+#include <sys/resource.h>
+#include <sys/dir.h>
 #else
 #include <sys/dir.h>
 #endif
@@ -249,6 +255,42 @@ static void logVec3( const std::string& name, const glm::vec3& vec ) {
 
 static void logVec2( const std::string& name, const glm::vec2& vec ) {
   printf( "glm::vec2 %-8s( %12.8f, %12.8f ); \n", name.c_str(), vec[0], vec[1] );
+}
+
+inline float deterministic_exp(float x) {
+    if (x < -87.33654f) return 0.0f;
+    if (x >  88.72283f) return 3.4028235e38f;
+    const float INV_LN2 = 1.4426950408889634f;
+    float k_f = std::floor(x * INV_LN2 + 0.5f);
+    int32_t k = static_cast<int32_t>(k_f);
+    const float LN2_HI = 0.6931457519f;
+    const float LN2_LO = 1.4286067653e-6f;
+    float r = (x - k_f * LN2_HI) - k_f * LN2_LO;
+    float p = 0.04166666f;
+    p = p * r + 0.16666667f;
+    p = p * r + 0.5f;
+    p = p * r + 1.0f;
+    p = p * r + 1.0f;
+    p = std::ldexp(p, k); 
+    return std::max(p, 0.0f);
+}
+
+static size_t getPeakMemoryUsage() {
+#if defined(WIN32)
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        return pmc.PeakWorkingSetSize;
+    }
+    return 0;
+#elif defined(__linux__)
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return static_cast<size_t>(usage.ru_maxrss) * 1024;
+    }
+    return 0;
+#else
+    return 0; 
+#endif
 }
 
 typedef float ( *CastFunction )( uint8_t* pPointer );

@@ -48,4 +48,20 @@ class RasterizerSoftware {
 
   template <typename T, int N>
   void render( const Pointcloud& pc, const Viewpoint& viewpoint, Image<T, N>& image, Image<uint8_t, 1>& ocm );
+
+  private:
+  struct SplatData {
+    glm::vec2  screen_;
+    glm::vec3  conic_;
+    glm::vec4  color_;
+    float      maxSigma_;
+    glm::ivec2 minUV_;
+    glm::ivec2 maxUV_;
+  };
+
+  // Buffers persistants
+  mutable std::vector<SplatData> projected_;
+  mutable std::vector<std::vector<int32_t>> tileBins_;
+  mutable std::vector<int32_t> tileBinsFlat_;
+  mutable std::vector<int32_t> tileOffsets_;
 };

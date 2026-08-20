@@ -226,15 +226,12 @@ void Viewpoints::display( const Pointcloud& pc, int width, int height ) {
   
   if ( viewpoints_.size() > 0 ) {
     focal_ = viewpoints_[0].focal();
-    center_ = viewpoints_[0].center();
     originalWidth_  = viewpoints_[0].originalWidth();
     originalHeight_ = viewpoints_[0].originalHeight();
     glm::vec2 adjustedFocal = focal_;
-    glm::vec2 adjustedCenter = center_;
     if (originalHeight_ > 0) {
       float scale = static_cast<float>(height) / static_cast<float>(originalHeight_);
       adjustedFocal = focal_ * scale;
-      adjustedCenter = center_ * scale;
     }
     float fov = 2 * atan( 1.0f / ( 2 * adjustedFocal[1] / height ) );
     camera_.create( 10.f, fov );
@@ -246,7 +243,6 @@ void Viewpoints::display( const Pointcloud& pc, int width, int height ) {
       camera_.setLookAt( eye, center, up );
     }
   } else {
-    center_ = glm::vec2( 0.f );
     float fov = 2 * atan( 1.0f / ( 2 * focal_[1] / height ) );
     camera_.create( 10.f, fov );
     camera_.initialize( width, height );
@@ -306,29 +302,17 @@ void Viewpoints::display( const Pointcloud& pc, int width, int height ) {
                              viewpoints_[i].pos(), 0.1, 0.05, getRandomColor() );
 
   glm::vec2 currentFocal = focal_;
-  glm::vec2 currentCenter = center_;
   if (originalHeight_ > 0) {
     float scale = static_cast<float>(height) / static_cast<float>(originalHeight_);
     currentFocal = focal_ * scale;
-    currentCenter = center_ * scale;
   }
 
   // Rendering loop
   while ( !glfwWindowShouldClose( window ) ) {
     glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
     glClearColor( 0.f, 0.f, 0.f, 1.f );
+    auto projMat       = camera_.projMat();
     auto viewMat       = camera_.viewMat();
-    float zNear = 0.01f, zFar = 10000000000.0f;
-    glm::mat4 projMat;
-    if ( currentCenter.x > 0.f && currentCenter.y > 0.f && currentFocal.x > 0.f && currentFocal.y > 0.f ) {
-      float left   = -zNear * currentCenter.x / currentFocal.x;
-      float right  =  zNear * ( (float)width - currentCenter.x ) / currentFocal.x;      
-      float bottom = -zNear * ( (float)height - currentCenter.y ) / currentFocal.y;
-      float top    =  zNear * currentCenter.y / currentFocal.y;
-      projMat = glm::frustum( left, right, bottom, top, zNear, zFar );
-    } else {
-      projMat = camera_.projMat();
-    }
     auto modelViewProj = projMat * viewMat;
     glBindVertexArray( vao );
 
