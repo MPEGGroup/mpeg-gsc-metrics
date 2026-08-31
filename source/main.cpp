@@ -334,9 +334,10 @@ int main( int32_t argc, char* argv[] ) {
             pngName = srcDir / "rasterized_images" / (objName + stringFormat( "_F%04d_", frameIndex ) + fileHash) / 
               ( objName + stringFormat("_F%04d_V%04d_%dx%d.png", frameIndex, viewpoint.index(), params.width_, params.height_));   
             if (std::filesystem::exists(pngName)) {
-              imageUint8[0].loadPNG(pngName.string());               
-              srcImageLoaded = true;
-              if (params.verbose_) printf("Load source image from cache.\n");
+              if( imageUint8[0].loadPNG(pngName.string()) ){
+                srcImageLoaded = true;
+                if (params.verbose_) printf("Load source image from cache.\n");
+              }
             }
           }
           if (!srcImageLoaded) {                 
